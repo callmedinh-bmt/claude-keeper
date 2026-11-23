@@ -52,9 +52,9 @@ func (a *trayApp) onReady() {
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Thoát", "")
 
-	a.sched = NewScheduler(a.store, Ping, a.refresh)
+	a.sched = NewScheduler(a.store, Ping, a.onSchedulerEvent)
 	if a.usage != nil {
-		a.sched.SetResetSource(a.usage.FiveHourReset)
+		a.sched.SetResetSource(a.usage)
 	}
 	go a.sched.Run(ctx)
 	a.refresh()
@@ -149,6 +149,14 @@ func (a *trayApp) applyServerUsage(s UsageSnapshot) {
 		a.usageNoteItem.Hide()
 	}
 	systray.SetIcon(iconForPercent(s.FiveHourPercent()))
+}
+
+// onSchedulerEvent chạy sau mỗi lần gửi hoặc xác minh: số usage có thể vừa đổi nên cập nhật cả 2 phần menu.
+func (a *trayApp) onSchedulerEvent() {
+	a.refresh()
+	if a.usage != nil {
+		a.applyServerUsage(a.usage.Snapshot())
+	}
 }
 
 func (a *trayApp) toggleAutostart() {

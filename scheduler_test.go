@@ -63,6 +63,90 @@ func TestNextPingFrom(t *testing.T) {
 	}
 }
 
+type fakeSource struct {
+	snap      UsageSnapshot
+	reset     time.Time
+	refreshes int
+}
+
+func (f *fakeSource) Refresh(context.Context) UsageSnapshot { f.refreshes++; return f.snap }
+func (f *fakeSource) FiveHourReset() time.Time              { return f.reset }
+
+// verifyFixture: đã gửi lúc base, đang chờ xác minh; now chỉnh được.
+func verifyFixture(t *testing.T, src *fakeSource, now *time.Time, pings *int) *Scheduler {
+	t.Helper()
+	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"))
+	s := NewScheduler(store, func(context.Context) error { *pings++; return nil }, nil)
+	s.now = func() time.Time { return *now }
+	s.SetResetSource(src)
+	if err := s.PingNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestVerifyConfirmedWhenServerShowsNewReset(t *testing.T) {
+	now, pings := base, 0
+	src := &fakeSource{reset: base.Add(5 * time.Hour), snap: UsageSnapshot{Usage: ServerUsage{FetchedAt: base.Add(time.Minute)}}}
+	s := verifyFixture(t, src, &now, &pings)
+	now = base.Add(time.Minute)
+	s.verifyStep(context.Background())
+	if !s.verifySince.IsZero() || pings != 1 {
+		t.Errorf("verifySince=%v pings=%d, want xác nhận xong và không gửi lại", s.verifySince, pings)
+	}
+}
+
+func TestVerifyResendsWhileServerShowsOldResetThenGivesUp(t *testing.T) {
+	now, pings := base, 0
+	old := base.Add(-time.Hour) // reset của phiên cũ
+	src := &fakeSource{reset: old}
+	s := verifyFixture(t, src, &now, &pings)
+
+	step := func() {
+		now = now.Add(verifyGrace)
+		src.snap = UsageSnapshot{Usage: ServerUsage{FetchedAt: now}} // số mới lấy, vẫn reset cũ
+		s.verifyStep(context.Background())
+	}
+	for i := 1; i <= maxRePings; i++ {
+		step()
+		if pings != 1+i {
+			t.Fatalf("lần kiểm tra %d: pings=%d, want %d", i, pings, 1+i)
+		}
+	}
+	step() // hết lượt gửi lại: bỏ cuộc, không gửi thêm
+	if pings != 1+maxRePings || !s.verifySince.IsZero() {
+		t.Errorf("pings=%d verifySince=%v, want bỏ cuộc sau %d lần gửi lại", pings, s.verifySince, maxRePings)
+	}
+}
+
+func TestVerifyDoesNotResendWithoutFreshData(t *testing.T) {
+	now, pings := base, 0
+	// FetchedAt trước lúc gửi: số cũ, không đủ căn cứ để kết luận phiên chưa mở.
+	src := &fakeSource{reset: base.Add(-time.Hour), snap: UsageSnapshot{Usage: ServerUsage{FetchedAt: base.Add(-time.Minute)}}}
+	s := verifyFixture(t, src, &now, &pings)
+	now = base.Add(verifyGrace + time.Minute)
+	s.verifyStep(context.Background())
+	if pings != 1 || s.verifySince.IsZero() {
+		t.Fatalf("pings=%d verifySince=%v, want vẫn chờ", pings, s.verifySince)
+	}
+	now = base.Add(verifyTimeout)
+	s.verifyStep(context.Background())
+	if pings != 1 || !s.verifySince.IsZero() {
+		t.Errorf("hết timeout phải bỏ cuộc mà không gửi lại: pings=%d verifySince=%v", pings, s.verifySince)
+	}
+}
+
+func TestVerifyUnverifiableWhenTokenExpired(t *testing.T) {
+	now, pings := base, 0
+	src := &fakeSource{snap: UsageSnapshot{Note: noteTokenExpired}}
+	s := verifyFixture(t, src, &now, &pings)
+	now = base.Add(verifyGrace)
+	s.verifyStep(context.Background())
+	if pings != 1 || !s.verifySince.IsZero() {
+		t.Errorf("pings=%d verifySince=%v, want dừng xác minh và không gửi lại", pings, s.verifySince)
+	}
+}
+
 func TestSchedulerUsesServerReset(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"))
 	if err := store.SetLastPing(base); err != nil {
@@ -71,7 +155,7 @@ func TestSchedulerUsesServerReset(t *testing.T) {
 	s := NewScheduler(store, nil, nil)
 	s.now = func() time.Time { return base }
 	reset := base.Add(2 * time.Hour)
-	s.SetResetSource(func() time.Time { return reset })
+	s.SetResetSource(&fakeSource{reset: reset})
 	if got, want := s.NextPing(), reset.Add(time.Minute); !got.Equal(want) {
 		t.Fatalf("NextPing = %v, want %v", got, want)
 	}

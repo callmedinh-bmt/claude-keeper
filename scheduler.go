@@ -12,7 +12,18 @@ const (
 	pingMargin    = time.Minute     // chờ thêm 1 phút sau khi phiên hết để chắc chắn phiên cũ đã đóng
 	checkInterval = time.Minute     // chu kỳ kiểm tra của ticker
 	retryDelay    = 5 * time.Minute // gửi lỗi thì 5 phút sau thử lại
+
+	// Sau khi gửi, đối chiếu với server xem phiên mới đã hiện chưa.
+	verifyGrace   = 3 * time.Minute  // server báo reset cũ quá ngần này thì coi là phiên chưa mở và gửi lại
+	verifyTimeout = 10 * time.Minute // không có số mới từ server quá ngần này thì bỏ cuộc, không gửi lại
+	maxRePings    = 3                // số lần gửi lại tối đa cho mỗi lần mở phiên
 )
+
+// ResetSource là nguồn giờ reset phiên 5h do server báo (UsageClient).
+type ResetSource interface {
+	FiveHourReset() time.Time // zero nếu chưa biết
+	Refresh(ctx context.Context) UsageSnapshot
+}
 
 // NextPingTime là giờ sớm nhất được gửi tiếp: lastPing + 5h + 1 phút.
 // lastPing zero (chưa gửi bao giờ) thì trả về zero = đến hạn ngay.
@@ -46,13 +57,14 @@ type Scheduler struct {
 	store  *StateStore
 	ping   func(context.Context) error
 	now    func() time.Time
-	onDone func() // gọi sau mỗi lần gửi (để cập nhật menu); có thể nil
-	// resetAt trả về giờ reset phiên 5h do server báo (zero = chưa biết); có thể nil.
-	resetAt func() time.Time
+	onDone func()      // gọi sau mỗi lần gửi (để cập nhật menu); có thể nil
+	reset  ResetSource // có thể nil: khi đó chỉ tính theo lastPing, không xác minh
 
-	mu      sync.Mutex
-	busy    bool
-	retryAt time.Time
+	mu          sync.Mutex
+	busy        bool
+	retryAt     time.Time
+	verifySince time.Time // giờ bắt đầu lần gửi đang chờ server xác nhận (zero = không chờ)
+	rePings     int       // số lần đã gửi lại trong đợt xác minh hiện tại
 }
 
 func NewScheduler(store *StateStore, ping func(context.Context) error, onDone func()) *Scheduler {
@@ -60,17 +72,17 @@ func NewScheduler(store *StateStore, ping func(context.Context) error, onDone fu
 }
 
 // SetResetSource gắn nguồn giờ reset từ server; gọi trước Run.
-func (s *Scheduler) SetResetSource(f func() time.Time) {
+func (s *Scheduler) SetResetSource(src ResetSource) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.resetAt = f
+	s.reset = src
 }
 
 // nextLocked phải được gọi khi đang giữ s.mu.
 func (s *Scheduler) nextLocked() time.Time {
 	var reset time.Time
-	if s.resetAt != nil {
-		reset = s.resetAt()
+	if s.reset != nil {
+		reset = s.reset.FiveHourReset()
 	}
 	return nextPingFrom(s.store.LastPing(), reset)
 }
@@ -105,6 +117,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 				log.Error("gửi tự động thất bại, sẽ thử lại", "retry_in", retryDelay.String(), "err", err)
 			}
 		}
+		s.verifyStep(ctx)
 		select {
 		case <-ctx.Done():
 			log.Info("scheduler dừng")
@@ -116,9 +129,78 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 var errBusy = errors.New("đang có một lần gửi khác chạy")
 
+// verifyStep đối chiếu lần gửi gần nhất với server: phiên mới phải hiện ra (reset sau giờ gửi).
+// Server vẫn báo reset cũ sau verifyGrace thì gửi lại (tối đa maxRePings lần). Không đọc được usage
+// (token hết hạn, API lỗi) thì không gửi lại vì không biết phiên đã mở hay chưa.
+func (s *Scheduler) verifyStep(ctx context.Context) {
+	log := moduleLog("scheduler")
+	s.mu.Lock()
+	src, since, busy := s.reset, s.verifySince, s.busy
+	s.mu.Unlock()
+	if src == nil || since.IsZero() || busy {
+		return
+	}
+
+	snap := src.Refresh(ctx) // có giới hạn 60 giây/lần bên trong, gọi mỗi phút vẫn an toàn
+	reset := src.FiveHourReset()
+	now := s.now()
+	fresh := snap.Usage.FetchedAt.After(since) // số lấy sau lúc gửi mới có giá trị xác minh
+	elapsed := now.Sub(since)
+
+	const (
+		wait = iota
+		confirmed
+		unverifiable
+		giveUp
+		resend
+	)
+	s.mu.Lock()
+	if s.verifySince != since { // có lần gửi khác chen vào trong lúc gọi mạng
+		s.mu.Unlock()
+		return
+	}
+	action := wait
+	switch {
+	case fresh && reset.After(since):
+		action = confirmed
+	case snap.Note == noteTokenExpired || snap.Note == noteNeedLogin:
+		action = unverifiable
+	case elapsed >= verifyTimeout || (fresh && elapsed >= verifyGrace && s.rePings >= maxRePings):
+		action = giveUp
+	case fresh && elapsed >= verifyGrace && !now.Before(s.retryAt):
+		action = resend
+		s.rePings++
+	}
+	attempt := s.rePings
+	if action != wait && action != resend {
+		s.verifySince, s.rePings = time.Time{}, 0
+	}
+	s.mu.Unlock()
+
+	switch action {
+	case confirmed:
+		log.Info("server đã báo phiên mới", "reset", reset.Format(time.RFC3339))
+	case unverifiable:
+		log.Warn("không xác minh được phiên mới vì không đọc được usage", "note", snap.Note)
+	case giveUp:
+		log.Error("server vẫn chưa báo phiên mới, bỏ cuộc", "since", since.Format(time.RFC3339), "fresh", fresh)
+	case resend:
+		log.Warn("server vẫn báo reset cũ, gửi lại", "attempt", attempt, "max", maxRePings, "old_reset", reset.Format(time.RFC3339))
+		if err := s.doPing(ctx, true); err != nil && !errors.Is(err, errBusy) {
+			log.Error("gửi lại thất bại", "attempt", attempt, "err", err)
+		}
+	}
+	if s.onDone != nil {
+		s.onDone() // cập nhật menu và icon theo số vừa lấy
+	}
+}
+
 // PingNow gửi ngay (dùng cho lịch tự động và nút "Mở phiên ngay").
+func (s *Scheduler) PingNow(ctx context.Context) error { return s.doPing(ctx, false) }
+
+// doPing gửi 1 tin. retry=true khi gửi lại trong đợt xác minh (giữ nguyên bộ đếm rePings).
 // Mutex chỉ giữ khi đọc/ghi cờ, KHÔNG giữ trong lúc chạy claude (có thể mất vài phút).
-func (s *Scheduler) PingNow(ctx context.Context) error {
+func (s *Scheduler) doPing(ctx context.Context, retry bool) error {
 	log := moduleLog("scheduler")
 	s.mu.Lock()
 	if s.busy {
@@ -137,6 +219,12 @@ func (s *Scheduler) PingNow(ctx context.Context) error {
 		s.retryAt = s.now().Add(retryDelay)
 	} else {
 		s.retryAt = time.Time{}
+		if s.reset != nil {
+			s.verifySince = started // chờ server xác nhận phiên mới
+		}
+		if !retry {
+			s.rePings = 0
+		}
 	}
 	s.mu.Unlock()
 
