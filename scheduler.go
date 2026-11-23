@@ -39,7 +39,7 @@ func NextPingTime(lastPing time.Time) time.Time {
 // khi sau lastPing: nếu trước đó thì đó là phiên cũ, quay về lastPing + 5h + 1 phút.
 func nextPingFrom(lastPing, serverReset time.Time) time.Time {
 	if !serverReset.IsZero() && serverReset.After(lastPing) {
-		return serverReset.Add(pingMargin)
+		return serverReset.Add(pingMargin).Local() // server trả UTC; menu dùng Format nên phải đổi sang giờ máy
 	}
 	return NextPingTime(lastPing)
 }

@@ -147,6 +147,17 @@ func TestVerifyUnverifiableWhenTokenExpired(t *testing.T) {
 	}
 }
 
+func TestNextPingFromReturnsLocalTime(t *testing.T) {
+	reset := time.Date(2026, 11, 23, 20, 20, 0, 0, time.UTC) // 03:20 ngày hôm sau ở UTC+7
+	got := nextPingFrom(base, reset)
+	if got.Location() != time.Local {
+		t.Errorf("location = %v, want Local", got.Location())
+	}
+	if want := reset.Add(time.Minute).Local().Format("15:04"); got.Format("15:04") != want {
+		t.Errorf("Format = %s, want %s", got.Format("15:04"), want)
+	}
+}
+
 func TestSchedulerUsesServerReset(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"))
 	if err := store.SetLastPing(base); err != nil {
