@@ -25,6 +25,8 @@ type trayApp struct {
 	usage *UsageClient // nil nếu không xác định được đường dẫn credentials
 
 	// Làm mới khi người dùng rê chuột/mở menu: tối đa 1 lần chạy cùng lúc, cách nhau >= hoverRefreshGap.
+	tipMu     sync.Mutex
+	lastTip   string
 	freshMu   sync.Mutex
 	ctx       context.Context
 	freshing  bool
@@ -77,7 +79,10 @@ func (a *trayApp) onReady() {
 	}
 
 	// Hook do bản systray đã vá (third_party/systray) cung cấp; chạy trên luồng UI nên phải trả về ngay.
-	systray.SetOnHover(a.requestFresh)
+	systray.SetOnHover(func() {
+		a.updateTooltip() // tooltip hiện ngay số mới nhất đang biết; chỉ gọi Windows khi nội dung đổi
+		a.requestFresh()
+	})
 	systray.SetOnBeforeMenu(func() {
 		a.showCached() // đồng bộ, rất nhanh: menu hiện ra đã có giờ/số mới nhất đang biết
 		a.requestFresh()
@@ -167,9 +172,40 @@ func (a *trayApp) showCached() {
 }
 
 func (a *trayApp) updateNext() {
-	next := a.sched.NextPing().Format("15:04")
-	a.nextItem.SetTitle("Gửi tiếp lúc: " + next)
-	systray.SetTooltip("claude-keeper · Gửi tiếp lúc " + next)
+	a.nextItem.SetTitle("Gửi tiếp lúc: " + a.sched.NextPing().Format("15:04"))
+	a.updateTooltip()
+}
+
+// maxTooltipRunes: Windows giới hạn tooltip 127 ký tự (NOTIFYICONDATA.szTip 128 gồm NUL);
+// toàn bộ chữ ở đây nằm trong BMP nên 1 rune = 1 đơn vị UTF-16.
+const maxTooltipRunes = 127
+
+// buildTooltip ghép 5h, tuần và giờ gửi tiếp; cắt nếu vượt giới hạn của Windows.
+func buildTooltip(s UsageSnapshot, next time.Time) string {
+	tip := s.FiveHourLine() + "\n" + s.WeekLine() + "\nGửi tiếp lúc " + next.Format("15:04")
+	if r := []rune(tip); len(r) > maxTooltipRunes {
+		tip = string(r[:maxTooltipRunes])
+	}
+	return tip
+}
+
+// updateTooltip đặt tooltip khi rê chuột; không làm gì nếu nội dung không đổi (rê chuột phát sinh sự kiện rất dày).
+func (a *trayApp) updateTooltip() {
+	if a.sched == nil {
+		return
+	}
+	var s UsageSnapshot
+	if a.usage != nil {
+		s = a.usage.Snapshot()
+	}
+	tip := buildTooltip(s, a.sched.NextPing())
+	a.tipMu.Lock()
+	defer a.tipMu.Unlock()
+	if tip == a.lastTip {
+		return
+	}
+	a.lastTip = tip
+	systray.SetTooltip(tip)
 }
 
 // sessionEnd ưu tiên giờ reset do server báo (chính xác, tính cả dùng trên web/máy khác).
@@ -227,6 +263,7 @@ func (a *trayApp) applyServerUsage(s UsageSnapshot) {
 		a.usageNoteItem.Hide()
 	}
 	systray.SetIcon(iconForPercent(s.FiveHourPercent()))
+	a.updateTooltip()
 }
 
 // onSchedulerEvent chạy sau mỗi lần gửi hoặc xác minh: số usage có thể vừa đổi nên cập nhật cả 2 phần menu.
