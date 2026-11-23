@@ -172,6 +172,17 @@ func (a *trayApp) updateNext() {
 	systray.SetTooltip("claude-keeper · Gửi tiếp lúc " + next)
 }
 
+// sessionEnd ưu tiên giờ reset do server báo (chính xác, tính cả dùng trên web/máy khác).
+// Chỉ khi chưa có thì dùng ước tính từ log local (làm tròn xuống giờ tròn nên có thể lệch) và trả estimated=true.
+func (a *trayApp) sessionEnd(u SessionUsage) (end time.Time, estimated bool) {
+	if a.usage != nil {
+		if r := a.usage.FiveHourReset(); r.After(nowFunc()) {
+			return r.Local(), false
+		}
+	}
+	return u.End.Local(), true
+}
+
 // refresh cập nhật tooltip và 2 dòng thông tin trên menu.
 func (a *trayApp) refresh() {
 	a.updateNext()
@@ -181,7 +192,12 @@ func (a *trayApp) refresh() {
 		var u SessionUsage
 		if u, err = ReadUsage(root, nowFunc()); err == nil {
 			if u.Active {
-				a.usageItem.SetTitle(fmt.Sprintf("Usage: %s · hết phiên lúc %s", formatTokens(u.Tokens), u.End.Format("15:04")))
+				end, estimated := a.sessionEnd(u)
+				prefix := ""
+				if estimated {
+					prefix = "~"
+				}
+				a.usageItem.SetTitle(fmt.Sprintf("Usage: %s · hết phiên lúc %s%s", formatTokens(u.Tokens), prefix, end.Format("15:04")))
 			} else {
 				a.usageItem.SetTitle("Usage: chưa có phiên đang mở")
 			}
