@@ -1,0 +1,2 @@
+{"type":"assistant","timestamp":"2026-11-23T11:00:00.000Z","requestId":"req_2","message":{"id":"msg_2","usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}}
+{"type":"assistant","timestamp":"2026-11-23T13:00:00.000Z","requestId":"req_future","message":{"id":"msg_future","usage":{"input_tokens":5000}}}
