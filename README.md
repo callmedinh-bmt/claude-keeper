@@ -36,6 +36,10 @@ Gọi `GET https://api.anthropic.com/api/oauth/usage` bằng access token trong 
 - Tự gọi mỗi 10 phút và khi bấm "Làm mới usage"; 2 lần gọi cách nhau tối thiểu 60 giây. 429 thì nghỉ 30 phút; lỗi khác giữ số cũ kèm "(cũ, lúc HH:MM)".
 - Cache: `%APPDATA%\claude-keeper\usage.json` (không chứa token).
 
+## Làm mới khi rê chuột / mở menu
+
+Khi rê chuột vào icon hoặc click mở menu, app làm mới giờ gửi tiếp, token local và % usage từ server (tối đa 1 lần/5 giây; gọi server vẫn theo luật 60 giây và 429 ở trên). Thư viện `fyne.io/systray` không có hook này trên Windows nên được vendor vào `third_party/systray` (Apache-2.0) và vá thêm `SetOnHover`, `SetOnBeforeMenu`; `go.mod` dùng `replace` trỏ vào đó.
+
 ## Dữ liệu và log
 
 - Log: `%APPDATA%\claude-keeper\app.log` (hoặc menu "Xem log").

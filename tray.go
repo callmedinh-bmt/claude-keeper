@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
 	"fyne.io/systray"
 )
 
-const refreshInterval = time.Minute
+const (
+	refreshInterval = time.Minute
+	hoverRefreshGap = 5 * time.Second // rê chuột phát sinh sự kiện rất dày nên phải throttle
+)
 
 // trayApp gom menu khay và scheduler.
 type trayApp struct {
@@ -20,6 +24,12 @@ type trayApp struct {
 
 	usage *UsageClient // nil nếu không xác định được đường dẫn credentials
 
+	// Làm mới khi người dùng rê chuột/mở menu: tối đa 1 lần chạy cùng lúc, cách nhau >= hoverRefreshGap.
+	freshMu   sync.Mutex
+	ctx       context.Context
+	freshing  bool
+	lastFresh time.Time
+
 	fiveItem, weekItem, usageNoteItem  *systray.MenuItem
 	usageItem, nextItem, autostartItem *systray.MenuItem
 }
@@ -28,6 +38,9 @@ func (a *trayApp) onReady() {
 	log := moduleLog("tray")
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
+	a.freshMu.Lock()
+	a.ctx = ctx
+	a.freshMu.Unlock()
 
 	systray.SetIcon(iconData)
 	systray.SetTitle("claude-keeper")
@@ -62,6 +75,13 @@ func (a *trayApp) onReady() {
 		a.applyServerUsage(a.usage.Snapshot()) // hiện ngay số từ cache
 		go a.refreshServerUsage(ctx)
 	}
+
+	// Hook do bản systray đã vá (third_party/systray) cung cấp; chạy trên luồng UI nên phải trả về ngay.
+	systray.SetOnHover(a.requestFresh)
+	systray.SetOnBeforeMenu(func() {
+		a.showCached() // đồng bộ, rất nhanh: menu hiện ra đã có giờ/số mới nhất đang biết
+		a.requestFresh()
+	})
 
 	go func() {
 		ticker := time.NewTicker(refreshInterval)
@@ -108,11 +128,53 @@ func (a *trayApp) onExit() {
 	}
 }
 
-// refresh cập nhật tooltip và 2 dòng thông tin trên menu.
-func (a *trayApp) refresh() {
+// acquireFresh cho phép bắt đầu 1 lần làm mới nếu không có lần nào đang chạy và đã quá hoverRefreshGap.
+func (a *trayApp) acquireFresh(now time.Time) (context.Context, bool) {
+	a.freshMu.Lock()
+	defer a.freshMu.Unlock()
+	if a.ctx == nil || a.freshing || now.Sub(a.lastFresh) < hoverRefreshGap {
+		return nil, false
+	}
+	a.freshing, a.lastFresh = true, now
+	return a.ctx, true
+}
+
+func (a *trayApp) releaseFresh() {
+	a.freshMu.Lock()
+	a.freshing = false
+	a.freshMu.Unlock()
+}
+
+// requestFresh không chặn: làm mới số local ngay, rồi gọi server (UsageClient tự giữ luật 60 giây/429).
+func (a *trayApp) requestFresh() {
+	ctx, ok := a.acquireFresh(nowFunc())
+	if !ok {
+		return
+	}
+	go func() {
+		defer a.releaseFresh()
+		a.refresh()
+		a.refreshServerUsage(ctx)
+	}()
+}
+
+// showCached cập nhật phần không cần I/O: giờ gửi tiếp và số usage server đang có.
+func (a *trayApp) showCached() {
+	a.updateNext()
+	if a.usage != nil {
+		a.applyServerUsage(a.usage.Snapshot())
+	}
+}
+
+func (a *trayApp) updateNext() {
 	next := a.sched.NextPing().Format("15:04")
 	a.nextItem.SetTitle("Gửi tiếp lúc: " + next)
 	systray.SetTooltip("claude-keeper · Gửi tiếp lúc " + next)
+}
+
+// refresh cập nhật tooltip và 2 dòng thông tin trên menu.
+func (a *trayApp) refresh() {
+	a.updateNext()
 
 	root, err := claudeProjectsDir()
 	if err == nil {
@@ -136,7 +198,7 @@ func (a *trayApp) refreshServerUsage(ctx context.Context) {
 		return
 	}
 	a.applyServerUsage(a.usage.Refresh(ctx))
-	a.refresh() // giờ "Gửi tiếp lúc" phụ thuộc giờ reset vừa lấy
+	a.updateNext() // giờ "Gửi tiếp lúc" phụ thuộc giờ reset vừa lấy
 }
 
 func (a *trayApp) applyServerUsage(s UsageSnapshot) {
