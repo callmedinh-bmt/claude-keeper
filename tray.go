@@ -176,13 +176,35 @@ func (a *trayApp) updateNext() {
 	a.updateTooltip()
 }
 
-// maxTooltipRunes: Windows giới hạn tooltip 127 ký tự (NOTIFYICONDATA.szTip 128 gồm NUL);
-// toàn bộ chữ ở đây nằm trong BMP nên 1 rune = 1 đơn vị UTF-16.
-const maxTooltipRunes = 127
+// maxTooltipRunes: đo thực tế trên Windows, tooltip bị cắt ở 64 ký tự (kể cả dấu xuống dòng) dù struct có chỗ cho 128.
+// Toàn bộ chữ ở đây nằm trong BMP nên 1 rune = 1 đơn vị UTF-16.
+const maxTooltipRunes = 63
 
-// buildTooltip ghép 5h, tuần và giờ gửi tiếp; cắt nếu vượt giới hạn của Windows.
+// tipWindow là dòng rút gọn cho tooltip: "5h: 70% · 03:20", "Tuần: 76% · thứ 5 11:00".
+func tipWindow(label string, w *UsageWindow, withWeekday bool) string {
+	if w == nil {
+		return label + ": --"
+	}
+	line := fmt.Sprintf("%s: %.0f%%", label, w.Percent)
+	if !w.ResetsAt.IsZero() {
+		r := w.ResetsAt.Local()
+		if withWeekday {
+			line += " · " + viWeekday(r.Weekday()) + " " + r.Format("15:04")
+		} else {
+			line += " · " + r.Format("15:04")
+		}
+	}
+	return line
+}
+
+// buildTooltip ghép 5h, tuần và giờ gửi tiếp sao cho vừa giới hạn của Windows (dòng dài nhất ~61 ký tự).
+// Số cũ thì thêm "(cũ)" ở dòng đầu; chi tiết giờ lấy số nằm ở menu.
 func buildTooltip(s UsageSnapshot, next time.Time) string {
-	tip := s.FiveHourLine() + "\n" + s.WeekLine() + "\nGửi tiếp lúc " + next.Format("15:04")
+	first := tipWindow("5h", s.Usage.FiveHour, false)
+	if s.Stale {
+		first += " (cũ)"
+	}
+	tip := first + "\n" + tipWindow("Tuần", s.Usage.SevenDay, true) + "\nGửi tiếp " + next.Format("15:04")
 	if r := []rune(tip); len(r) > maxTooltipRunes {
 		tip = string(r[:maxTooltipRunes])
 	}

@@ -18,7 +18,7 @@ func TestBuildTooltipHasBothWindowsAndFitsWindowsLimit(t *testing.T) {
 		},
 	}
 	tip := buildTooltip(s, at)
-	for _, want := range []string{"5h: 100%", "Tuần: 100%", "Gửi tiếp lúc 04:00"} {
+	for _, want := range []string{"5h: 100%", "Tuần: 100%", "Gửi tiếp 04:00"} {
 		if !strings.Contains(tip, want) {
 			t.Errorf("tooltip thiếu %q: %q", want, tip)
 		}
