@@ -18,6 +18,9 @@ type trayApp struct {
 	sched  *Scheduler
 	cancel context.CancelFunc
 
+	usage *UsageClient // nil nếu không xác định được đường dẫn credentials
+
+	fiveItem, weekItem, usageNoteItem  *systray.MenuItem
 	usageItem, nextItem, autostartItem *systray.MenuItem
 }
 
@@ -29,11 +32,19 @@ func (a *trayApp) onReady() {
 	systray.SetIcon(iconData)
 	systray.SetTitle("claude-keeper")
 
+	a.fiveItem = systray.AddMenuItem("5h: --", "")
+	a.fiveItem.Disable()
+	a.weekItem = systray.AddMenuItem("Tuần: --", "")
+	a.weekItem.Disable()
+	a.usageNoteItem = systray.AddMenuItem("", "")
+	a.usageNoteItem.Disable()
+	a.usageNoteItem.Hide()
 	a.usageItem = systray.AddMenuItem("Usage: đang tính...", "")
 	a.usageItem.Disable()
 	a.nextItem = systray.AddMenuItem("Gửi tiếp lúc: --:--", "")
 	a.nextItem.Disable()
 	systray.AddSeparator()
+	refreshUsageItem := systray.AddMenuItem("Làm mới usage", "Lấy lại % usage từ server")
 	pingItem := systray.AddMenuItem("Mở phiên ngay", "Gửi 1 tin để mở phiên 5 giờ mới")
 	usagePageItem := systray.AddMenuItem("Mở trang Usage (claude.ai)", "")
 	a.autostartItem = systray.AddMenuItemCheckbox("Tự chạy khi bật máy", "", AutostartEnabled())
@@ -44,16 +55,27 @@ func (a *trayApp) onReady() {
 	a.sched = NewScheduler(a.store, Ping, a.refresh)
 	go a.sched.Run(ctx)
 	a.refresh()
+	if a.usage != nil {
+		a.applyServerUsage(a.usage.Snapshot()) // hiện ngay số từ cache
+		go a.refreshServerUsage(ctx)
+	}
 
 	go func() {
 		ticker := time.NewTicker(refreshInterval)
 		defer ticker.Stop()
+		usageTicker := time.NewTicker(usageAutoInterval)
+		defer usageTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				a.refresh()
+			case <-usageTicker.C:
+				go a.refreshServerUsage(ctx)
+			case <-refreshUsageItem.ClickedCh:
+				// Gọi mạng tối đa 15 giây nên phải chạy riêng; UsageClient tự chặn bấm dồn (< 60 giây).
+				go a.refreshServerUsage(ctx)
 			case <-pingItem.ClickedCh:
 				// Chạy trong goroutine riêng để menu không bị đơ trong lúc chờ claude.
 				go func() {
@@ -103,6 +125,26 @@ func (a *trayApp) refresh() {
 	}
 	moduleLog("tray").Error("không cập nhật được usage", "err", err)
 	a.usageItem.SetTitle("Usage: lỗi đọc dữ liệu (xem log)")
+}
+
+// refreshServerUsage lấy usage từ server rồi cập nhật menu và icon.
+func (a *trayApp) refreshServerUsage(ctx context.Context) {
+	if a.usage == nil {
+		return
+	}
+	a.applyServerUsage(a.usage.Refresh(ctx))
+}
+
+func (a *trayApp) applyServerUsage(s UsageSnapshot) {
+	a.fiveItem.SetTitle(s.FiveHourLine())
+	a.weekItem.SetTitle(s.WeekLine())
+	if s.Note != "" {
+		a.usageNoteItem.SetTitle(s.Note)
+		a.usageNoteItem.Show()
+	} else {
+		a.usageNoteItem.Hide()
+	}
+	systray.SetIcon(iconForPercent(s.FiveHourPercent()))
 }
 
 func (a *trayApp) toggleAutostart() {

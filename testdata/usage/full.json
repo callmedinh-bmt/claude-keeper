@@ -1,0 +1,7 @@
+{
+  "five_hour": {"utilization": 64.0, "resets_at": "2026-11-23T20:20:00.946841+00:00", "limit_dollars": null, "locked_reason": null},
+  "seven_day": {"utilization": 76.0, "resets_at": "2026-11-26T04:00:00.946870+00:00", "limit_dollars": null},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "monthly_limit": null},
+  "limits": []
+}

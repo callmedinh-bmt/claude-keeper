@@ -58,6 +58,9 @@ func main() {
 		return
 	}
 	app := &trayApp{store: store}
+	if app.usage, err = NewDefaultUsageClient(dir); err != nil {
+		log.Warn("tắt tính năng usage từ server", "err", err)
+	}
 	systray.Run(app.onReady, app.onExit)
 	log.Info("claude-keeper đã thoát")
 }
