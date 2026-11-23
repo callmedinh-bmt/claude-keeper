@@ -53,6 +53,9 @@ func (a *trayApp) onReady() {
 	quitItem := systray.AddMenuItem("Thoát", "")
 
 	a.sched = NewScheduler(a.store, Ping, a.refresh)
+	if a.usage != nil {
+		a.sched.SetResetSource(a.usage.FiveHourReset)
+	}
 	go a.sched.Run(ctx)
 	a.refresh()
 	if a.usage != nil {
@@ -133,6 +136,7 @@ func (a *trayApp) refreshServerUsage(ctx context.Context) {
 		return
 	}
 	a.applyServerUsage(a.usage.Refresh(ctx))
+	a.refresh() // giờ "Gửi tiếp lúc" phụ thuộc giờ reset vừa lấy
 }
 
 func (a *trayApp) applyServerUsage(s UsageSnapshot) {

@@ -36,9 +36,44 @@ func TestIsDue(t *testing.T) {
 		{"qua mốc thử lại", next.Add(5 * time.Minute), base, next.Add(5 * time.Minute), true},
 	}
 	for _, c := range cases {
-		if got := isDue(c.now, c.last, c.retryAt); got != c.want {
+		if got := isDue(c.now, NextPingTime(c.last), c.retryAt); got != c.want {
 			t.Errorf("%s: isDue = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestNextPingFrom(t *testing.T) {
+	reset := base.Add(3 * time.Hour) // phiên thật kết thúc sớm hơn lastPing + 5h
+	cases := []struct {
+		name        string
+		last, reset time.Time
+		want        time.Time
+	}{
+		{"không biết reset: theo lastPing", base, time.Time{}, base.Add(5*time.Hour + time.Minute)},
+		{"reset sau lastPing: theo server", base, reset, reset.Add(time.Minute)},
+		{"reset là phiên cũ (trước lastPing): theo lastPing", base, base.Add(-time.Hour), base.Add(5*time.Hour + time.Minute)},
+		{"reset đã qua nhưng sau lastPing: đến hạn", base, base.Add(time.Minute), base.Add(2 * time.Minute)},
+		{"chưa gửi bao giờ nhưng đang có phiên: chờ reset", time.Time{}, reset, reset.Add(time.Minute)},
+		{"chưa gửi, không biết reset: gửi ngay", time.Time{}, time.Time{}, time.Time{}},
+	}
+	for _, c := range cases {
+		if got := nextPingFrom(c.last, c.reset); !got.Equal(c.want) {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSchedulerUsesServerReset(t *testing.T) {
+	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"))
+	if err := store.SetLastPing(base); err != nil {
+		t.Fatal(err)
+	}
+	s := NewScheduler(store, nil, nil)
+	s.now = func() time.Time { return base }
+	reset := base.Add(2 * time.Hour)
+	s.SetResetSource(func() time.Time { return reset })
+	if got, want := s.NextPing(), reset.Add(time.Minute); !got.Equal(want) {
+		t.Fatalf("NextPing = %v, want %v", got, want)
 	}
 }
 

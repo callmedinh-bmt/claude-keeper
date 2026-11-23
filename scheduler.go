@@ -23,9 +23,19 @@ func NextPingTime(lastPing time.Time) time.Time {
 	return lastPing.Add(sessionLength + pingMargin)
 }
 
-// isDue cho biết đã đến lúc gửi chưa, có tính cả mốc thử lại sau lỗi.
-func isDue(now, lastPing, retryAt time.Time) bool {
-	return !now.Before(NextPingTime(lastPing)) && !now.Before(retryAt)
+// nextPingFrom chọn giờ gửi tiếp. Ưu tiên giờ reset thật của phiên 5h do server báo, vì app không biết
+// phiên bắt đầu từ lúc nào (có thể bạn đã dùng Claude trước lần gửi của app). serverReset chỉ đáng tin
+// khi sau lastPing: nếu trước đó thì đó là phiên cũ, quay về lastPing + 5h + 1 phút.
+func nextPingFrom(lastPing, serverReset time.Time) time.Time {
+	if !serverReset.IsZero() && serverReset.After(lastPing) {
+		return serverReset.Add(pingMargin)
+	}
+	return NextPingTime(lastPing)
+}
+
+// isDue cho biết đã đến lúc gửi chưa (next zero = đến hạn ngay), có tính cả mốc thử lại sau lỗi.
+func isDue(now, next, retryAt time.Time) bool {
+	return !now.Before(next) && !now.Before(retryAt)
 }
 
 // nowFunc bỏ monotonic clock (Round(0)): sau khi máy ngủ, so sánh theo wall clock mới đúng.
@@ -37,6 +47,8 @@ type Scheduler struct {
 	ping   func(context.Context) error
 	now    func() time.Time
 	onDone func() // gọi sau mỗi lần gửi (để cập nhật menu); có thể nil
+	// resetAt trả về giờ reset phiên 5h do server báo (zero = chưa biết); có thể nil.
+	resetAt func() time.Time
 
 	mu      sync.Mutex
 	busy    bool
@@ -47,11 +59,27 @@ func NewScheduler(store *StateStore, ping func(context.Context) error, onDone fu
 	return &Scheduler{store: store, ping: ping, now: nowFunc, onDone: onDone}
 }
 
+// SetResetSource gắn nguồn giờ reset từ server; gọi trước Run.
+func (s *Scheduler) SetResetSource(f func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resetAt = f
+}
+
+// nextLocked phải được gọi khi đang giữ s.mu.
+func (s *Scheduler) nextLocked() time.Time {
+	var reset time.Time
+	if s.resetAt != nil {
+		reset = s.resetAt()
+	}
+	return nextPingFrom(s.store.LastPing(), reset)
+}
+
 // NextPing trả về giờ sẽ gửi tiếp (đã tính mốc thử lại nếu vừa lỗi).
 func (s *Scheduler) NextPing() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := NextPingTime(s.store.LastPing())
+	next := s.nextLocked()
 	if s.retryAt.After(next) {
 		return s.retryAt
 	}
@@ -70,7 +98,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		s.mu.Lock()
-		due := isDue(s.now(), s.store.LastPing(), s.retryAt)
+		due := isDue(s.now(), s.nextLocked(), s.retryAt)
 		s.mu.Unlock()
 		if due {
 			if err := s.PingNow(ctx); err != nil && !errors.Is(err, errBusy) {

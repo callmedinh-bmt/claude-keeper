@@ -286,6 +286,17 @@ func (c *UsageClient) saveCache(u ServerUsage) error {
 	return nil
 }
 
+// FiveHourReset là giờ reset phiên 5h do server báo (zero nếu chưa biết).
+// Giờ reset của một phiên cố định nên số lấy từ lần gọi trước vẫn dùng được.
+func (c *UsageClient) FiveHourReset() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if w := c.snap.Usage.FiveHour; w != nil {
+		return w.ResetsAt
+	}
+	return time.Time{}
+}
+
 // FiveHourLine: "5h: 34% · reset 15:04".
 func (s UsageSnapshot) FiveHourLine() string { return s.windowLine("5h", s.Usage.FiveHour, false) }
 
